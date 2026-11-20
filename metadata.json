@@ -1,0 +1,6 @@
+{
+  "name": "ProctorKZ Cloud",
+  "description": "Multi-teacher online exam, proctoring, teacher dashboard, and student progress tracking platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
