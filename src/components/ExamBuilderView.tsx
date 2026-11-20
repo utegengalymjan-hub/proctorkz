@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
+  Download,
   Edit3,
   Plus,
   RefreshCw,
@@ -31,6 +32,7 @@ import type {
   QuestionType,
   SubjectKey,
 } from '../types';
+import { ExamExportModal } from './ExamExportModal';
 import { ImportQuestionsModal } from './ImportQuestionsModal';
 import { RichText } from './RichText';
 
@@ -54,6 +56,7 @@ export const ExamBuilderView: React.FC<ExamBuilderViewProps> = ({
   const [exam, setExam] = useState<Exam>(() => JSON.parse(JSON.stringify(initialExam)));
   const [saving, setSaving] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showExport, setShowExport] = useState(false);
 
   // Question Draft State
   const [editingQuestionIdx, setEditingQuestionIdx] = useState<number | null>(null);
@@ -295,14 +298,22 @@ export const ExamBuilderView: React.FC<ExamBuilderViewProps> = ({
             {tLabel(lang, 'балл', 'total points')} · {exam.code}
           </div>
         </div>
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => setShowImport(true)}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold"
           >
             <Upload className="w-3.5 h-3.5" />
-            {tLabel(lang, 'Word / Excel / Drive Импорт', 'Import Questions')}
+            {tLabel(lang, 'Құжаттан импорт', 'Import Doc')}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowExport(true)}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold"
+          >
+            <Download className="w-3.5 h-3.5" />
+            {tLabel(lang, 'Жүктеп алу', 'Download')}
           </button>
           <button
             type="button"
@@ -508,20 +519,116 @@ export const ExamBuilderView: React.FC<ExamBuilderViewProps> = ({
             )}
 
             {exam.mode === 'exam' && (
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-500">
-                  {tLabel(lang, 'Макс. ескерту саны', 'Max Violations')}
-                </span>
-                <input
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={exam.maxViolations}
-                  onChange={(e) =>
-                    setExam((prev) => ({ ...prev, maxViolations: Math.max(1, Number(e.target.value) || 3) }))
-                  }
-                  className="w-20 px-2.5 py-1 rounded-md border border-slate-300 font-mono text-right"
-                />
+              <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-slate-800">
+                    {tLabel(lang, 'Ескерту саны (Прокторинг)', 'Violation Limit')}
+                  </span>
+                  <span className="font-mono font-bold text-blue-600 tabular-nums">
+                    {exam.maxViolations === 0
+                      ? tLabel(lang, 'Шектеусіз', 'Unlimited')
+                      : `${exam.maxViolations} ${tLabel(lang, 'рет', 'max')}`}
+                  </span>
+                </div>
+
+                {/* Quick Presets */}
+                <div className="grid grid-cols-5 gap-1">
+                  {[1, 3, 5, 10, 0].map((preset) => {
+                    const active = exam.maxViolations === preset;
+                    return (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setExam((prev) => ({ ...prev, maxViolations: preset }))}
+                        className={`py-1.5 rounded-md text-[11px] font-semibold transition-colors ${
+                          active
+                            ? 'bg-slate-900 text-white'
+                            : 'bg-white border border-slate-200 text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {preset === 0 ? '∞' : preset}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Exact 1-20 Slider + Input */}
+                {exam.maxViolations > 0 && (
+                  <div className="flex items-center gap-2.5">
+                    <input
+                      type="range"
+                      min={1}
+                      max={20}
+                      value={exam.maxViolations}
+                      onChange={(e) =>
+                        setExam((prev) => ({
+                          ...prev,
+                          maxViolations: Math.max(1, Math.min(20, Number(e.target.value) || 3)),
+                        }))
+                      }
+                      className="flex-1 accent-blue-600"
+                    />
+                    <input
+                      type="number"
+                      min={1}
+                      max={20}
+                      value={exam.maxViolations}
+                      onChange={(e) =>
+                        setExam((prev) => ({
+                          ...prev,
+                          maxViolations: Math.max(1, Math.min(20, Number(e.target.value) || 1)),
+                        }))
+                      }
+                      className="w-14 px-2 py-1 rounded-md border border-slate-300 bg-white font-mono text-center"
+                    />
+                  </div>
+                )}
+
+                {/* Action on Limit Reached */}
+                <div className="pt-2 border-t border-slate-200 space-y-1.5">
+                  <div className="text-[11px] font-semibold text-slate-600">
+                    {tLabel(lang, 'Лимит толғандағы әрекет:', 'When limit is reached:')}
+                  </div>
+                  <div className="grid grid-cols-2 gap-1 p-0.5 bg-slate-200/70 rounded-lg">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExam((prev) => ({ ...prev, violationAction: 'auto_submit' }))
+                      }
+                      className={`py-1.5 px-2 rounded-md text-[11px] font-semibold transition-colors ${
+                        (exam.violationAction || 'auto_submit') === 'auto_submit'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600'
+                      }`}
+                    >
+                      {tLabel(lang, 'Автоматты жабу', 'Auto-submit')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExam((prev) => ({ ...prev, violationAction: 'warn_only' }))}
+                      className={`py-1.5 px-2 rounded-md text-[11px] font-semibold transition-colors ${
+                        exam.violationAction === 'warn_only'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600'
+                      }`}
+                    >
+                      {tLabel(lang, 'Тек ескерту', 'Warn & log only')}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    {exam.maxViolations === 0 || exam.violationAction === 'warn_only'
+                      ? tLabel(
+                          lang,
+                          'Ескертулер оқушыға көрсетіліп, мұғалім журналына жазылады, бірақ емтихан жабылмайды.',
+                          'Violations are warned and logged to teacher & student reports without forcing submission.'
+                        )
+                      : tLabel(
+                          lang,
+                          `Оқушы ${exam.maxViolations} рет ереже бұзғанда емтихан автоматты түрде аяқталады.`,
+                          `Exam automatically submits if the student reaches ${exam.maxViolations} violation(s).`
+                        )}
+                  </p>
+                </div>
               </div>
             )}
 
@@ -982,6 +1089,15 @@ export const ExamBuilderView: React.FC<ExamBuilderViewProps> = ({
           onImported={(qs) =>
             setExam((prev) => ({ ...prev, questions: [...prev.questions, ...qs] }))
           }
+          notify={notify}
+        />
+      )}
+
+      {showExport && (
+        <ExamExportModal
+          lang={lang}
+          exam={exam}
+          onClose={() => setShowExport(false)}
           notify={notify}
         />
       )}

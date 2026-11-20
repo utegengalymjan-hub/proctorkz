@@ -16,6 +16,7 @@ import {
   Search,
   ShieldAlert,
   ShieldCheck,
+  SlidersHorizontal,
   Square,
   Trash2,
   Unlock,
@@ -32,8 +33,10 @@ import type {
   Submission,
   SubmissionDetail,
   TeacherProfile,
+  ViolationAction,
 } from '../types';
 import { ExamBuilderView } from './ExamBuilderView';
+import { ExamExportModal } from './ExamExportModal';
 import { SubmissionDetailModal } from './SubmissionDetailModal';
 
 interface TeacherDashboardViewProps {
@@ -79,6 +82,11 @@ export const TeacherDashboardView: React.FC<TeacherDashboardViewProps> = ({
   const [showNewFolderModal, setShowNewFolderModal] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [deletingExam, setDeletingExam] = useState<Exam | null>(null);
+  const [exportingExam, setExportingExam] = useState<Exam | null>(null);
+  const [proctorExam, setProctorExam] = useState<Exam | null>(null);
+  const [draftMaxViolations, setDraftMaxViolations] = useState<number>(3);
+  const [draftViolationAction, setDraftViolationAction] = useState<ViolationAction>('auto_submit');
+  const [savingProctor, setSavingProctor] = useState(false);
 
   const kpis = useMemo(() => {
     const totalExams = exams.length;
@@ -139,6 +147,7 @@ export const TeacherDashboardView: React.FC<TeacherDashboardViewProps> = ({
       isTimed: true,
       timeLimitMin: 15,
       maxViolations: 3,
+      violationAction: 'auto_submit',
       shuffleQuestions: true,
       shuffleOptions: true,
       questions: [],
@@ -259,6 +268,30 @@ export const TeacherDashboardView: React.FC<TeacherDashboardViewProps> = ({
     await api.deleteSubmission(id);
     await onRefresh();
     notify(tLabel(lang, 'Жазба өшірілді', 'Submission deleted'), 'info');
+  };
+
+  const openProctorEditor = (ex: Exam) => {
+    setProctorExam(ex);
+    setDraftMaxViolations(ex.maxViolations ?? 3);
+    setDraftViolationAction(ex.violationAction || 'auto_submit');
+  };
+
+  const handleSaveProctorSettings = async () => {
+    if (!proctorExam) return;
+    setSavingProctor(true);
+    try {
+      await api.patchExam(proctorExam.id, {
+        maxViolations: draftMaxViolations,
+        violationAction: draftViolationAction,
+      });
+      await onRefresh();
+      setProctorExam(null);
+      notify(tLabel(lang, 'Ескерту баптауы сақталды', 'Violation settings updated'), 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Қате', 'error');
+    } finally {
+      setSavingProctor(false);
+    }
   };
 
   const navItems: { id: TeacherNavTab; label: string; icon: React.ReactNode; count?: number }[] = [
@@ -755,6 +788,31 @@ export const TeacherDashboardView: React.FC<TeacherDashboardViewProps> = ({
                               </span>
                             </div>
 
+                            {ex.mode === 'exam' && (
+                              <div className="flex items-center justify-between gap-2 text-xs text-slate-600 pt-0.5">
+                                <span className="inline-flex items-center gap-1.5">
+                                  <ShieldAlert className="w-3.5 h-3.5 text-slate-400" />
+                                  <span className="tabular-nums">
+                                    {ex.maxViolations === 0
+                                      ? tLabel(lang, 'Ескерту: Шектеусіз', 'Violations: Unlimited')
+                                      : `${tLabel(lang, 'Лимит:', 'Limit:')} ${ex.maxViolations} · ${
+                                          ex.violationAction === 'warn_only'
+                                            ? tLabel(lang, 'Тек ескерту', 'Warn only')
+                                            : tLabel(lang, 'Авто-жабу', 'Auto-submit')
+                                        }`}
+                                  </span>
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => openProctorEditor(ex)}
+                                  className="inline-flex items-center gap-1 font-semibold text-blue-600 hover:text-blue-700"
+                                >
+                                  <SlidersHorizontal className="w-3 h-3" />
+                                  {tLabel(lang, 'Реттеу', 'Adjust')}
+                                </button>
+                              </div>
+                            )}
+
                             {ex.requireTeacherStart && (
                               <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 flex items-center justify-between gap-2">
                                 <span className="text-xs font-semibold text-slate-700">
@@ -796,6 +854,15 @@ export const TeacherDashboardView: React.FC<TeacherDashboardViewProps> = ({
                               >
                                 <Edit3 className="w-3.5 h-3.5" />
                                 {tLabel(lang, 'Өңдеу', 'Edit')}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setExportingExam(ex)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold"
+                                title={tLabel(lang, 'Word / PDF / Excel жүктеп алу', 'Download exam')}
+                              >
+                                <Download className="w-3.5 h-3.5" />
+                                {tLabel(lang, 'Жүктеу', 'Export')}
                               </button>
                               <button
                                 type="button"
@@ -1068,6 +1135,137 @@ export const TeacherDashboardView: React.FC<TeacherDashboardViewProps> = ({
           onSaveGrades={handleSaveGrades}
           onDelete={handleDeleteSubmission}
         />
+      )}
+
+      {/* Export Exam Modal */}
+      {exportingExam && (
+        <ExamExportModal
+          lang={lang}
+          exam={exportingExam}
+          onClose={() => setExportingExam(null)}
+          notify={notify}
+        />
+      )}
+
+      {/* Quick Proctoring Violation Limit Modal */}
+      {proctorExam && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 border border-slate-200 space-y-5">
+            <div>
+              <h3 className="text-base font-bold text-slate-900">
+                {tLabel(lang, 'Ескерту санын реттеу', 'Adjust Proctoring Violation Limit')}
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5 truncate">
+                {proctorExam.title} · <span className="font-mono">{proctorExam.code}</span>
+              </p>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-slate-700">
+                  {tLabel(lang, 'Рұқсат етілген ескерту саны', 'Allowed Violations')}
+                </span>
+                <span className="font-mono font-bold text-blue-600 tabular-nums">
+                  {draftMaxViolations === 0
+                    ? tLabel(lang, 'Шектеусіз', 'Unlimited')
+                    : `${draftMaxViolations} ${tLabel(lang, 'рет', 'max')}`}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-5 gap-1.5">
+                {[1, 3, 5, 10, 0].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => setDraftMaxViolations(preset)}
+                    className={`py-2 rounded-lg text-xs font-semibold transition-colors ${
+                      draftMaxViolations === preset
+                        ? 'bg-slate-900 text-white'
+                        : 'bg-slate-50 border border-slate-200 text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    {preset === 0 ? tLabel(lang, '∞', '∞') : preset}
+                  </button>
+                ))}
+              </div>
+
+              {draftMaxViolations > 0 && (
+                <div className="flex items-center gap-3 pt-1">
+                  <input
+                    type="range"
+                    min={1}
+                    max={20}
+                    value={draftMaxViolations}
+                    onChange={(e) => setDraftMaxViolations(Number(e.target.value))}
+                    className="flex-1 accent-blue-600"
+                  />
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={draftMaxViolations}
+                    onChange={(e) =>
+                      setDraftMaxViolations(
+                        Math.max(1, Math.min(20, Number(e.target.value) || 1))
+                      )
+                    }
+                    className="w-16 px-2 py-1 rounded-md border border-slate-300 font-mono text-center"
+                  />
+                </div>
+              )}
+
+              <div className="pt-3 border-t border-slate-100 space-y-2">
+                <div className="font-semibold text-slate-700">
+                  {tLabel(lang, 'Лимит толғандағы әрекет', 'Action on Limit Reached')}
+                </div>
+                <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-100 rounded-lg">
+                  <button
+                    type="button"
+                    onClick={() => setDraftViolationAction('auto_submit')}
+                    className={`py-2 rounded-md text-xs font-semibold ${
+                      draftViolationAction === 'auto_submit'
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600'
+                    }`}
+                  >
+                    {tLabel(lang, 'Автоматты жабу', 'Auto-submit')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDraftViolationAction('warn_only')}
+                    className={`py-2 rounded-md text-xs font-semibold ${
+                      draftViolationAction === 'warn_only'
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600'
+                    }`}
+                  >
+                    {tLabel(lang, 'Тек ескерту', 'Warn & log only')}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setProctorExam(null)}
+                className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold"
+              >
+                {tLabel(lang, 'Болдырмау', 'Cancel')}
+              </button>
+              <button
+                type="button"
+                disabled={savingProctor}
+                onClick={handleSaveProctorSettings}
+                className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold disabled:opacity-50"
+              >
+                {savingProctor
+                  ? tLabel(lang, 'Сақталуда...', 'Saving...')
+                  : tLabel(lang, 'Сақтау', 'Save')}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

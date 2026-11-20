@@ -56,6 +56,13 @@ export interface Folder {
   createdAt: string;
 }
 
+export type ViolationAction = 'auto_submit' | 'warn_only';
+
+export interface ParsedQuestionDraft extends Question {
+  selected: boolean;
+  needsAnswerReview?: boolean;
+}
+
 export interface Exam {
   id: string;
   teacherId: string;
@@ -71,7 +78,8 @@ export interface Exam {
   liveStarted: boolean;
   isTimed: boolean;
   timeLimitMin: number;
-  maxViolations: number;
+  maxViolations: number; // 0 = unlimited, 1..20 = specific limit
+  violationAction?: ViolationAction;
   shuffleQuestions: boolean;
   shuffleOptions: boolean;
   questions: Question[];

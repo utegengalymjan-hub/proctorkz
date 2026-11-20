@@ -180,9 +180,131 @@ export function evaluateSingleQuestion(
   return { earned, maxPts, isCorrect, status };
 }
 
-export function parseSmartImport(rawText: string): Question[] {
-  const blocks = rawText.trim().split(/\n\s*\n+/);
-  const parsed: Question[] = [];
+function stripBoldMarkers(s: string): string {
+  return s.replace(/\*\*/g, '').trim();
+}
+
+function letterToOptionIndex(tok: string): number {
+  const clean = tok.trim().toUpperCase().replace(/[.)]/g, '');
+  const latin = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+  const lIdx = latin.indexOf(clean);
+  if (lIdx !== -1) return lIdx;
+  const cyrillic = ['А', 'Б', 'В', 'Г', 'Д', 'Е', 'Ж', 'З'];
+  const cIdx = cyrillic.indexOf(clean);
+  if (cIdx !== -1) return cIdx;
+  const num = parseInt(clean, 10);
+  if (!Number.isNaN(num) && num >= 1 && num <= 8) return num - 1;
+  return -1;
+}
+
+function isOptionLine(line: string): boolean {
+  const stripped = stripBoldMarkers(line);
+  return (
+    /^(\*|\+|✓|✔)?\s*[A-Ha-hА-Да-дЕе][.)]\s+/.test(stripped) ||
+    /^(\*|\+|✓|✔|-|•)\s+\S/.test(stripped)
+  );
+}
+
+function isQuestionStartLine(line: string): boolean {
+  const stripped = stripBoldMarkers(line);
+  return (
+    /^\d{1,3}[.)]\s+\S/.test(stripped) ||
+    /^(сұрақ|question|тапсырма)\s*\d*\s*[:.)]/i.test(stripped) ||
+    /^\[(реттік|ordering|толықтыру|fill|сәйкестендіру|matching|ашық|open)\]/i.test(stripped)
+  );
+}
+
+function extractAnswerKeyMap(rawText: string): {
+  cleanedText: string;
+  keyMap: Map<number, number[]>;
+} {
+  const keyMap = new Map<number, number[]>();
+  const lines = rawText.replace(/\r\n/g, '\n').split('\n');
+  let keyStartIdx = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    const clean = stripBoldMarkers(lines[i]).trim();
+    if (/^(жауап\s*кілт[іи]?|жауаптар[ы]?|дұрыс\s*жауаптар|ответы|ключ[и]?|answer\s*keys?|answers)\s*:?/i.test(clean)) {
+      keyStartIdx = i;
+      break;
+    }
+  }
+
+  if (keyStartIdx === -1) {
+    return { cleanedText: rawText, keyMap };
+  }
+
+  const keyBlock = lines.slice(keyStartIdx).join('\n');
+  const pairRegex = /(\d{1,3})\s*[-–—.):]\s*([A-Ha-hА-Да-дЕе](?:\s*[,/]\s*[A-Ha-hА-Да-дЕе])*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = pairRegex.exec(keyBlock)) !== null) {
+    const qNum = parseInt(m[1], 10);
+    const letters = m[2]
+      .split(/[,/\s]+/)
+      .map(letterToOptionIndex)
+      .filter((idx) => idx >= 0);
+    if (qNum > 0 && letters.length > 0) {
+      keyMap.set(qNum, letters);
+    }
+  }
+
+  const cleanedText = lines.slice(0, keyStartIdx).join('\n').trim();
+  return { cleanedText, keyMap };
+}
+
+function splitIntoQuestionBlocks(rawText: string): string[] {
+  const normalized = rawText.replace(/\r\n/g, '\n').trim();
+  if (!normalized) return [];
+
+  // First try splitting by blank lines
+  const coarseBlocks = normalized.split(/\n\s*\n+/).map((b) => b.trim()).filter(Boolean);
+  const finalBlocks: string[] = [];
+
+  coarseBlocks.forEach((block) => {
+    const lines = block
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    // If a single block contains multiple numbered questions separated by single newlines, split them
+    let current: string[] = [];
+    let hasSeenOption = false;
+
+    for (const line of lines) {
+      const startsNewQuestion =
+        current.length > 0 &&
+        isQuestionStartLine(line) &&
+        (hasSeenOption || !/^\d+[.)]\s+/.test(stripBoldMarkers(current[0])) || current.length >= 2);
+
+      // Avoid splitting ordered/matching list items under a tagged ordering/matching question
+      const parentIsListType =
+        current.length > 0 &&
+        /\[(реттік|ordering|сәйкестендіру|matching)\]/i.test(stripBoldMarkers(current[0]));
+
+      if (startsNewQuestion && !parentIsListType) {
+        finalBlocks.push(current.join('\n'));
+        current = [line];
+        hasSeenOption = false;
+      } else {
+        current.push(line);
+        if (isOptionLine(line)) hasSeenOption = true;
+      }
+    }
+
+    if (current.length > 0) {
+      finalBlocks.push(current.join('\n'));
+    }
+  });
+
+  return finalBlocks;
+}
+
+export function parseSmartImport(
+  rawText: string
+): Array<Question & { needsAnswerReview?: boolean }> {
+  const { cleanedText, keyMap } = extractAnswerKeyMap(rawText);
+  const blocks = splitIntoQuestionBlocks(cleanedText);
+  const parsed: Array<Question & { needsAnswerReview?: boolean }> = [];
   const baseTs = Date.now();
 
   blocks.forEach((block, idx) => {
@@ -192,25 +314,33 @@ export function parseSmartImport(rawText: string): Question[] {
       .filter(Boolean);
     if (!lines.length) return;
 
-    // Tab-separated single-line format (Excel paste)
-    if (lines.length === 1 && lines[0].includes('\t')) {
-      const cols = lines[0].split('\t').map((c) => c.trim());
-      if (cols.length >= 4) {
-        const opts = cols.slice(1, cols.length - 1);
-        const cIdx = parseInt(cols[cols.length - 1], 10) - 1;
+    // Tab-separated multi-line or single-line format (Excel / Word table paste)
+    if (lines.every((l) => l.includes('\t')) && lines[0].split('\t').length >= 4) {
+      lines.forEach((rowLine, rIdx) => {
+        const cols = rowLine.split('\t').map((c) => stripBoldMarkers(c));
+        if (cols.length < 4 || !cols[0]) return;
+        if (idx === 0 && rIdx === 0 && /^(сұрақ|question|#|№)/i.test(cols[0])) return;
+        const opts = cols.slice(1, cols.length - 1).filter(Boolean);
+        if (opts.length < 2) return;
+        const lastCell = cols[cols.length - 1];
+        const parsedIdx = letterToOptionIndex(lastCell);
         parsed.push({
-          id: `q-${baseTs}-${idx}`,
+          id: `q-${baseTs}-${idx}-${rIdx}`,
           type: 'single',
           points: 1,
           text: cols[0],
           options: opts,
-          correct: Number.isNaN(cIdx) ? 0 : Math.max(0, Math.min(cIdx, opts.length - 1)),
+          correct: parsedIdx >= 0 && parsedIdx < opts.length ? parsedIdx : 0,
+          needsAnswerReview: parsedIdx < 0 || parsedIdx >= opts.length,
         });
-        return;
-      }
+      });
+      return;
     }
 
-    const head = lines[0];
+    const rawHead = lines[0];
+    const head = stripBoldMarkers(rawHead);
+    const numMatch = head.match(/^(\d{1,3})[.)]\s*/);
+    const qNumber = numMatch ? parseInt(numMatch[1], 10) : parsed.length + 1;
 
     // Ordering
     if (/\[(реттік|ordering)\]/i.test(head)) {
@@ -221,10 +351,17 @@ export function parseSmartImport(rawText: string): Question[] {
           .trim() || 'Ретпен орналастырыңыз:';
       const items = lines
         .slice(1)
-        .map((l) => l.replace(/^(\d+[.)]|-)\s*/, '').trim())
+        .map((l) => stripBoldMarkers(l).replace(/^(\d+[.)]|-|•)\s*/, '').trim())
         .filter(Boolean);
       if (items.length >= 2) {
-        parsed.push({ id: `q-${baseTs}-${idx}`, type: 'ordering', points: 2, text: qText, items });
+        parsed.push({
+          id: `q-${baseTs}-${idx}`,
+          type: 'ordering',
+          points: 2,
+          text: qText,
+          items,
+          needsAnswerReview: false,
+        });
         return;
       }
     }
@@ -239,6 +376,7 @@ export function parseSmartImport(rawText: string): Question[] {
           .replace(/\[(толықтыру|fill)\]/i, '')
           .replace(/^\d+[.)]\s*/, '')
           .trim(),
+        needsAnswerReview: false,
       });
       return;
     }
@@ -255,52 +393,109 @@ export function parseSmartImport(rawText: string): Question[] {
           .trim() || 'Сәйкестендіріңіз:';
       const pairs: { left: string; right: string }[] = [];
       lines.slice(1).forEach((l) => {
-        const parts = l.split(l.includes('==') ? '==' : '->').map((s) => s.trim());
+        const clean = stripBoldMarkers(l).replace(/^(\d+[.)]|-|•)\s*/, '');
+        const parts = clean.split(clean.includes('==') ? '==' : '->').map((s) => s.trim());
         if (parts.length >= 2) pairs.push({ left: parts[0], right: parts[1] });
       });
       if (pairs.length) {
-        parsed.push({ id: `q-${baseTs}-${idx}`, type: 'matching', points: 2, text: qText, pairs });
+        parsed.push({
+          id: `q-${baseTs}-${idx}`,
+          type: 'matching',
+          points: 2,
+          text: qText,
+          pairs,
+          needsAnswerReview: false,
+        });
         return;
       }
     }
 
     // Choice / Binary / Open
-    const qText = head.replace(/^(сұрақ:|question:|^\d+[.)])\s*/i, '').trim();
-    const optLines: { text: string; isStarred: boolean }[] = [];
+    const qParts: string[] = [
+      head.replace(/^(сұрақ:|question:|тапсырма:|\d{1,3}[.)])\s*/i, '').trim(),
+    ];
+    const optLines: { text: string; isMarkedCorrect: boolean }[] = [];
     let expAns: string | null = null;
+    let startedOptions = false;
 
     for (let i = 1; i < lines.length; i++) {
-      const l = lines[i];
-      if (/^(жауабы|answer|дұрыс)[:\s]/i.test(l)) {
-        expAns = l.split(/[:\s]+/).slice(1).join(' ').toUpperCase();
-      } else if (/^(\*?[A-Ha-hА-Яа-я])[.)]\s+/.test(l) || /^(\*|-)\s*/.test(l)) {
-        const star = l.startsWith('*') || l.endsWith('*');
-        optLines.push({
-          text: l
-            .replace(/^\*/, '')
-            .replace(/\*$/, '')
-            .replace(/^([A-Ha-hА-Яа-я])[.)]\s+/, '')
-            .replace(/^-\s+/, '')
-            .trim(),
-          isStarred: star,
-        });
+      const rawLine = lines[i];
+      const cleanLine = stripBoldMarkers(rawLine);
+
+      if (/^(жауабы|жауап|answer|дұрыс\s*жауабы?|ответ|correct)[:\s]/i.test(cleanLine)) {
+        expAns = cleanLine
+          .replace(/^(жауабы|жауап|answer|дұрыс\s*жауабы?|ответ|correct)[:\s]+/i, '')
+          .trim();
+        continue;
+      }
+
+      if (isOptionLine(rawLine)) {
+        startedOptions = true;
+        const hasBoldCue = /\*\*[^*]+\*\*/.test(rawLine);
+        const hasSymbolCue =
+          /^(\*|\+|✓|✔)/.test(cleanLine) ||
+          /(\*|✓|✔|\(дұрыс\)|\(correct\)|\(true\))$/i.test(cleanLine);
+
+        const optText = cleanLine
+          .replace(/^(\*|\+|✓|✔)\s*/, '')
+          .replace(/(\*|✓|✔|\(дұрыс\)|\(correct\)|\(true\))$/i, '')
+          .replace(/^([A-Ha-hА-Да-дЕе])[.)]\s+/, '')
+          .replace(/^(-|•)\s+/, '')
+          .trim();
+
+        if (optText) {
+          optLines.push({
+            text: optText,
+            isMarkedCorrect: hasBoldCue || hasSymbolCue,
+          });
+        }
+      } else if (!startedOptions && !/^(кілт|keywords)[:\s]/i.test(cleanLine)) {
+        // Multi-line question stem continuation
+        qParts.push(cleanLine);
       }
     }
 
+    const qText = qParts.filter(Boolean).join(' ').trim();
+
     if (optLines.length >= 2) {
       const corr: number[] = [];
-      optLines.forEach((o, i) => {
-        if (o.isStarred) corr.push(i);
-      });
-      if (expAns && !corr.length) {
-        expAns.split(/[,;\s]+/).forEach((tok) => {
-          const li = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].indexOf(tok.trim());
-          if (li !== -1 && li < optLines.length) corr.push(li);
+
+      // Only treat bold cues as answer indicator if NOT all options are bolded
+      const allMarked = optLines.every((o) => o.isMarkedCorrect);
+      if (!allMarked) {
+        optLines.forEach((o, i) => {
+          if (o.isMarkedCorrect) corr.push(i);
         });
       }
+
+      if (expAns && !corr.length) {
+        expAns.split(/[,;\s/]+/).forEach((tok) => {
+          const li = letterToOptionIndex(tok);
+          if (li !== -1 && li < optLines.length && !corr.includes(li)) {
+            corr.push(li);
+          }
+        });
+        // Also check if expAns matches an option's text directly
+        if (!corr.length) {
+          const normExp = expAns.toLowerCase();
+          const txtIdx = optLines.findIndex((o) => o.text.toLowerCase() === normExp);
+          if (txtIdx !== -1) corr.push(txtIdx);
+        }
+      }
+
+      // Check trailing answer key block if still unknown
+      if (!corr.length && keyMap.has(qNumber)) {
+        const mapped = keyMap.get(qNumber)!.filter((i) => i >= 0 && i < optLines.length);
+        mapped.forEach((i) => {
+          if (!corr.includes(i)) corr.push(i);
+        });
+      }
+
+      const needsAnswerReview = corr.length === 0;
+
       if (
         optLines.length === 2 &&
-        ['иә', 'жоқ', 'дұрыс', 'қате', 'true', 'false', 'yes', 'no'].includes(
+        ['иә', 'жоқ', 'дұрыс', 'қате', 'true', 'false', 'yes', 'no', 'верно', 'неверно'].includes(
           optLines[0].text.toLowerCase()
         )
       ) {
@@ -311,6 +506,7 @@ export function parseSmartImport(rawText: string): Question[] {
           text: qText,
           options: optLines.map((o) => o.text),
           correct: corr[0] ?? 0,
+          needsAnswerReview,
         });
       } else if (corr.length > 1) {
         parsed.push({
@@ -320,6 +516,7 @@ export function parseSmartImport(rawText: string): Question[] {
           text: qText,
           options: optLines.map((o) => o.text),
           correct: corr,
+          needsAnswerReview: false,
         });
       } else {
         parsed.push({
@@ -329,16 +526,20 @@ export function parseSmartImport(rawText: string): Question[] {
           text: qText,
           options: optLines.map((o) => o.text),
           correct: corr[0] ?? 0,
+          needsAnswerReview,
         });
       }
-    } else {
-      const kw = lines.find((l) => /^(кілт|keywords)[:\s]/i.test(l));
+    } else if (qText) {
+      const kw = lines.find((l) => /^(кілт|keywords)[:\s]/i.test(stripBoldMarkers(l)));
       parsed.push({
         id: `q-${baseTs}-${idx}`,
         type: 'open',
         points: 2,
         text: qText.replace(/\[(ашық|open)\]/i, '').trim(),
-        keywords: kw ? kw.replace(/^(кілт|keywords)[:\s]+/i, '').trim() : '',
+        keywords: kw
+          ? stripBoldMarkers(kw).replace(/^(кілт|keywords)[:\s]+/i, '').trim()
+          : '',
+        needsAnswerReview: false,
       });
     }
   });

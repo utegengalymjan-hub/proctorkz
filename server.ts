@@ -1,9 +1,11 @@
+import 'dotenv/config';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { GoogleGenAI, Type } from '@google/genai';
 import express, { Request, Response, NextFunction } from 'express';
 import { createServer as createViteServer } from 'vite';
-import type { Exam, Folder, Submission } from './src/types.ts';
+import type { Exam, Folder, Question, QuestionType, Submission, ViolationAction } from './src/types.ts';
 
 interface TeacherRecord {
   id: string;
@@ -172,6 +174,7 @@ function createInitialStore(): StoreData {
       isTimed: true,
       timeLimitMin: 15,
       maxViolations: 3,
+      violationAction: 'auto_submit',
       shuffleQuestions: false,
       shuffleOptions: true,
       questions: createStarterQuestions(),
@@ -193,6 +196,7 @@ function createInitialStore(): StoreData {
       isTimed: true,
       timeLimitMin: 20,
       maxViolations: 3,
+      violationAction: 'auto_submit',
       shuffleQuestions: true,
       shuffleOptions: true,
       questions: [
@@ -637,6 +641,13 @@ async function startServer() {
       ? payload.folderId!
       : teacherFolders[0]?.id || 'f-default';
 
+    const rawMaxViolations = payload.maxViolations !== undefined ? Number(payload.maxViolations) : 3;
+    const clampedMaxViolations = Number.isNaN(rawMaxViolations)
+      ? 3
+      : Math.max(0, Math.min(20, Math.floor(rawMaxViolations)));
+    const validViolationAction: ViolationAction =
+      payload.violationAction === 'warn_only' ? 'warn_only' : 'auto_submit';
+
     const exam: Exam = {
       id: existingIdx !== -1 ? store.exams[existingIdx].id : 'ex-' + crypto.randomUUID().slice(0, 10),
       teacherId: tid,
@@ -652,7 +663,8 @@ async function startServer() {
       liveStarted: Boolean(payload.liveStarted),
       isTimed: payload.isTimed !== undefined ? Boolean(payload.isTimed) : true,
       timeLimitMin: Math.max(1, Number(payload.timeLimitMin) || 15),
-      maxViolations: Math.max(1, Number(payload.maxViolations) || 3),
+      maxViolations: clampedMaxViolations,
+      violationAction: validViolationAction,
       shuffleQuestions: payload.shuffleQuestions !== undefined ? Boolean(payload.shuffleQuestions) : true,
       shuffleOptions: payload.shuffleOptions !== undefined ? Boolean(payload.shuffleOptions) : true,
       questions: Array.isArray(payload.questions) ? payload.questions : [],
@@ -679,6 +691,12 @@ async function startServer() {
     if (typeof req.body.isOpen === 'boolean') exam.isOpen = req.body.isOpen;
     if (typeof req.body.liveStarted === 'boolean') exam.liveStarted = req.body.liveStarted;
     if (typeof req.body.folderId === 'string') exam.folderId = req.body.folderId;
+    if (typeof req.body.maxViolations === 'number' && !Number.isNaN(req.body.maxViolations)) {
+      exam.maxViolations = Math.max(0, Math.min(20, Math.floor(req.body.maxViolations)));
+    }
+    if (req.body.violationAction === 'auto_submit' || req.body.violationAction === 'warn_only') {
+      exam.violationAction = req.body.violationAction;
+    }
     exam.updatedAt = new Date().toISOString();
     saveStore(store);
     res.json(exam);
@@ -839,6 +857,241 @@ async function startServer() {
       res.json({ text });
     } catch {
       res.status(502).json({ error: 'Google Drive құжатын жүктеу кезінде қате орын алды' });
+    }
+  });
+
+  // AI-Powered Document Question & Answer Recognition (Gemini)
+  app.post('/api/import/parse-document', requireTeacherAuth, async (req: AuthRequest, res) => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      res.status(503).json({
+        error:
+          'GEMINI_API_KEY серверде бапталмаған. Settings > Secrets бөлімінде API кілтін тексеріңіз немесе «Жылдам құрылымдық тану» режимін таңдаңыз.',
+      });
+      return;
+    }
+
+    const fileName = String(req.body?.fileName || 'document');
+    const mimeType = String(req.body?.mimeType || 'text/plain');
+    const textContent = typeof req.body?.textContent === 'string' ? req.body.textContent.trim() : '';
+    const base64Data = typeof req.body?.base64Data === 'string' ? req.body.base64Data.trim() : '';
+
+    if (!textContent && !base64Data) {
+      res.status(400).json({ error: 'Талдау үшін құжат мазмұны бос.' });
+      return;
+    }
+
+    try {
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
+
+      const systemInstruction = `You are an expert exam parser for Kazakh, Russian, and English educational test documents.
+Extract EVERY question from the provided document and cleanly separate the question stem, answer options, and correct answer(s).
+
+Rules:
+1. Preserve original language (Kazakh, Russian, English) accurately, including Cyrillic letters (Ә, І, Ң, Ғ, Ү, Ұ, Қ, Ө, Һ).
+2. Strip leading numbering from question stems (e.g., "1.", "12)") and strip option prefixes (e.g., "A)", "А.", "b)", "*").
+3. Detect correct answers from ANY cue: asterisks (*), bold markers (**text**), checkmarks (✓/+), "Жауабы:/Ответ:/Answer:" lines, OR an answer key table at the end of the document.
+4. Choose the exact question type:
+   - "single": 1 correct option among 2+ choices
+   - "multiple": 2 or more correct options among choices
+   - "binary": True/False or Yes/No (Дұрыс/Қате, Иә/Жоқ)
+   - "matching": pairs of left -> right items
+   - "ordering": items that must be placed in sequence
+   - "fill": sentence with blanks formatted as [answer] inside the text
+   - "open": open-ended question without options
+5. If a question's correct answer is NOT clearly indicated anywhere in the document, set "needsAnswerReview": true and default correctIndices to [0] for choice questions. Otherwise set "needsAnswerReview": false.
+6. Preserve mathematical formulas using LaTeX $...$ syntax when present.
+7. Never invent questions not present in the document.`;
+
+      const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
+      if (base64Data && mimeType === 'application/pdf') {
+        parts.push({
+          inlineData: {
+            mimeType: 'application/pdf',
+            data: base64Data,
+          },
+        });
+        parts.push({
+          text: `Extract all exam questions and answers from this PDF file (${fileName}). Return structured JSON matching the schema.`,
+        });
+      } else {
+        parts.push({
+          text: `Extract all exam questions and answers from this document (${fileName}). Note that **bold** text often indicates the correct answer option.\n\n---\n${textContent.slice(0, 120000)}`,
+        });
+      }
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: { parts },
+        config: {
+          systemInstruction,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                type: {
+                  type: Type.STRING,
+                  description:
+                    'One of: single, multiple, binary, matching, ordering, fill, open',
+                },
+                text: {
+                  type: Type.STRING,
+                  description:
+                    'Clean question stem without leading number. For fill type, wrap each blank answer in [brackets].',
+                },
+                points: {
+                  type: Type.NUMBER,
+                  description: 'Point value (default 1, or 2 for matching/ordering/multiple/open).',
+                },
+                options: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: 'Answer options for single, multiple, or binary questions.',
+                },
+                correctIndices: {
+                  type: Type.ARRAY,
+                  items: { type: Type.INTEGER },
+                  description: '0-based indices of correct options for single, multiple, or binary.',
+                },
+                pairs: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      left: { type: Type.STRING },
+                      right: { type: Type.STRING },
+                    },
+                  },
+                  description: 'Matching pairs for matching questions.',
+                },
+                items: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: 'Items in correct order for ordering questions.',
+                },
+                keywords: {
+                  type: Type.STRING,
+                  description: 'Comma-separated grading keywords for open questions if provided.',
+                },
+                needsAnswerReview: {
+                  type: Type.BOOLEAN,
+                  description:
+                    'True if the correct answer was not explicitly marked in the source document.',
+                },
+              },
+              required: ['type', 'text'],
+            },
+          },
+        },
+      });
+
+      const rawJson = (response.text ?? '[]').trim();
+      const parsedArray = JSON.parse(rawJson);
+      if (!Array.isArray(parsedArray)) {
+        res.status(502).json({ error: 'AI жауабын оқу мүмкін болмады.' });
+        return;
+      }
+
+      const validTypes: QuestionType[] = [
+        'single',
+        'multiple',
+        'binary',
+        'matching',
+        'ordering',
+        'fill',
+        'open',
+      ];
+      const baseTs = Date.now();
+      const questions: Array<Question & { needsAnswerReview?: boolean }> = [];
+
+      parsedArray.forEach((raw: Record<string, unknown>, idx: number) => {
+        const text = String(raw.text || '').trim();
+        if (!text) return;
+        const type: QuestionType = validTypes.includes(raw.type as QuestionType)
+          ? (raw.type as QuestionType)
+          : 'single';
+        const points = Math.max(1, Number(raw.points) || (type === 'single' || type === 'binary' ? 1 : 2));
+        const needsAnswerReview = Boolean(raw.needsAnswerReview);
+
+        const q: Question & { needsAnswerReview?: boolean } = {
+          id: `q-ai-${baseTs}-${idx}`,
+          type,
+          points,
+          text,
+          needsAnswerReview,
+        };
+
+        if (type === 'single' || type === 'multiple' || type === 'binary') {
+          const rawOpts = Array.isArray(raw.options)
+            ? raw.options.map((o) => String(o || '').trim()).filter(Boolean)
+            : [];
+          const opts =
+            type === 'binary' && rawOpts.length < 2 ? ['Дұрыс', 'Қате'] : rawOpts;
+          if (opts.length < 2) {
+            q.type = 'open';
+            q.keywords = String(raw.keywords || '').trim();
+          } else {
+            q.options = opts;
+            const rawCorr = Array.isArray(raw.correctIndices)
+              ? raw.correctIndices
+                  .map((n) => Number(n))
+                  .filter((n) => Number.isInteger(n) && n >= 0 && n < opts.length)
+              : [];
+            if (type === 'multiple') {
+              q.correct = rawCorr.length ? rawCorr : [0];
+            } else {
+              q.correct = rawCorr.length ? rawCorr[0] : 0;
+            }
+          }
+        } else if (type === 'matching') {
+          const pairs = Array.isArray(raw.pairs)
+            ? raw.pairs
+                .map((p: Record<string, unknown>) => ({
+                  left: String(p?.left || '').trim(),
+                  right: String(p?.right || '').trim(),
+                }))
+                .filter((p) => p.left && p.right)
+            : [];
+          if (pairs.length >= 2) {
+            q.pairs = pairs;
+          } else {
+            q.type = 'open';
+          }
+        } else if (type === 'ordering') {
+          const items = Array.isArray(raw.items)
+            ? raw.items.map((it) => String(it || '').trim()).filter(Boolean)
+            : [];
+          if (items.length >= 2) {
+            q.items = items;
+          } else {
+            q.type = 'open';
+          }
+        } else if (type === 'fill') {
+          if (!/\[[^\]]+\]/.test(q.text)) {
+            q.type = 'open';
+          }
+        } else if (type === 'open') {
+          q.keywords = String(raw.keywords || '').trim();
+        }
+
+        questions.push(q);
+      });
+
+      res.json({ questions });
+    } catch (err: unknown) {
+      console.error('Gemini document parse error:', err);
+      const message =
+        err instanceof Error ? err.message : 'Құжатты AI арқылы тану кезінде қате орын алды';
+      res.status(502).json({ error: message });
     }
   });
 

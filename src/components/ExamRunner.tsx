@@ -246,8 +246,11 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
       violationsRef.current = next;
       setViolations(next);
 
-      const maxV = exam.maxViolations || 3;
-      if (next.length >= maxV) {
+      const maxV = exam.maxViolations ?? 3;
+      const isUnlimited = maxV === 0;
+      const action = exam.violationAction || 'auto_submit';
+
+      if (!isUnlimited && action === 'auto_submit' && next.length >= maxV) {
         notify(
           tLabel(
             lang,
@@ -256,7 +259,10 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
           ),
           'error'
         );
-        finishExam(true, tLabel(lang, 'Прокторинг лимиті асып кетті', 'Proctoring violation limit exceeded'));
+        finishExam(
+          true,
+          tLabel(lang, 'Прокторинг лимиті асып кетті', 'Proctoring violation limit exceeded')
+        );
       } else {
         setViolationModalReason(reason);
       }
@@ -315,7 +321,7 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
         document.removeEventListener(ev, preventCheat)
       );
     };
-  }, [isStrict, exam.maxViolations, finishExam, notify, lang]);
+  }, [isStrict, exam.maxViolations, exam.violationAction, finishExam, notify, lang]);
 
   const currentQ = questions[currentIdx];
 
@@ -500,7 +506,9 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
   const fontKey = (currentQ.fontFamily || exam.fontFamily || 'sans') as keyof typeof FONT_FAMILIES;
   const fontCss = (FONT_FAMILIES[fontKey] || FONT_FAMILIES.sans).css;
   const fontSizeCls = (FONT_SIZES[exam.fontSize] || FONT_SIZES.base).cls;
-  const maxV = exam.maxViolations || 3;
+  const maxV = exam.maxViolations ?? 3;
+  const isUnlimitedViolations = maxV === 0;
+  const isWarnOnly = exam.violationAction === 'warn_only';
 
   return (
     <div className={`${isStrict ? 'no-select' : ''} min-h-screen bg-slate-50 flex flex-col relative`}>
@@ -525,8 +533,20 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
             </h3>
             <p className="text-sm font-medium text-red-700">{violationModalReason}</p>
             <div className="py-2 px-4 rounded-lg bg-red-50 border border-red-200 text-sm font-mono font-bold text-red-700 tabular-nums inline-block">
-              {tLabel(lang, 'Ескерту:', 'Violation:')} {violations.length} / {maxV}
+              {tLabel(lang, 'Ескерту:', 'Violation:')}{' '}
+              {isUnlimitedViolations
+                ? `${violations.length} (${tLabel(lang, 'Шектеусіз', 'Unlimited')})`
+                : `${violations.length} / ${maxV}`}
             </div>
+            {(isUnlimitedViolations || isWarnOnly) && (
+              <p className="text-xs text-slate-500">
+                {tLabel(
+                  lang,
+                  'Бұл оқиға мұғалімнің прокторинг журналына тіркелді.',
+                  'This incident has been logged to your teacher’s proctoring report.'
+                )}
+              </p>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -593,7 +613,10 @@ export const ExamRunner: React.FC<ExamRunnerProps> = ({
                 <>
                   <span aria-hidden="true">·</span>
                   <span className={violations.length > 0 ? 'text-red-300 font-semibold' : 'text-emerald-300'}>
-                    {tLabel(lang, 'Ескерту:', 'Violations:')} {violations.length}/{maxV}
+                    {tLabel(lang, 'Ескерту:', 'Violations:')}{' '}
+                    {isUnlimitedViolations
+                      ? `${violations.length} (∞)`
+                      : `${violations.length}/${maxV}`}
                   </span>
                 </>
               )}

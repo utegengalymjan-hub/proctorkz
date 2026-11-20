@@ -92,7 +92,12 @@ export const api = {
       body: JSON.stringify(exam),
     }),
 
-  patchExam: (id: string, patch: Partial<Pick<Exam, 'isOpen' | 'liveStarted' | 'folderId'>>) =>
+  patchExam: (
+    id: string,
+    patch: Partial<
+      Pick<Exam, 'isOpen' | 'liveStarted' | 'folderId' | 'maxViolations' | 'violationAction'>
+    >
+  ) =>
     apiFetch<Exam>(`/api/exams/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(patch),
@@ -141,5 +146,18 @@ export const api = {
     apiFetch<{ text: string }>('/api/import/google-doc', {
       method: 'POST',
       body: JSON.stringify({ url }),
+    }),
+
+  parseDocumentWithAI: (payload: {
+    fileName?: string;
+    mimeType?: string;
+    textContent?: string;
+    base64Data?: string;
+  }) =>
+    apiFetch<{
+      questions: Array<import('../types').Question & { needsAnswerReview?: boolean }>;
+    }>('/api/import/parse-document', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
 };
